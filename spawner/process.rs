@@ -195,7 +195,7 @@ impl<'a> ResourceUsage<'a> {
 
 impl Group {
     pub fn new() -> Result<Self> {
-        imp::Group::new().map(Self)
+        imp::Group::new(true).map(Self)
     }
 
     pub fn add(&mut self, ps: &Process) -> Result<()> {

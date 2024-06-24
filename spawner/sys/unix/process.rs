@@ -21,7 +21,13 @@ use nix::unistd::{
     Pid, Uid,
 };
 
-use cgroups_fs::{Cgroup, CgroupName};
+use cgroups_fs::{Cgroup as CgroupV1, CgroupName};
+use cgroups_rs::cgroup::Cgroup as CgroupV2;
+use cgroups_rs::{memory::MemController, cpu::CpuController, cpuacct::CpuAcctController, pid::PidController, freezer::FreezerController,
+                 MaxValue, Controller, CgroupPid};
+use cgroups_rs::PidResources;
+use cgroups_rs::cgroup_builder::CgroupBuilder;
+use cgroups_rs::hierarchies;
 
 use procfs::process::FDTarget;
 
@@ -36,6 +42,7 @@ use std::os::unix::io::RawFd;
 use std::process;
 use std::thread;
 use std::time::Duration;
+use cgroups_rs::freezer::FreezerState;
 
 pub struct Stdio {
     pub stdin: ReadPipe,
@@ -59,6 +66,7 @@ pub struct ProcessInfo {
     username: Option<String>,
     filter: Option<SyscallFilter>,
     cpuset: Option<CpuSet>,
+    use_cgroups_v2 : bool,
 }
 
 #[derive(Copy, Clone)]
@@ -90,11 +98,16 @@ pub struct ResourceUsage<'a> {
     dead_tasks_info: DeadTasksInfo,
 }
 
-pub struct Group {
-    memory: Cgroup,
-    cpuacct: Cgroup,
-    pids: Cgroup,
-    freezer: Cgroup,
+pub enum Group {
+    V1{
+    memory: CgroupV1,
+    cpuacct: CgroupV1,
+    pids: CgroupV1,
+    freezer: CgroupV1,
+    },
+    V2 {
+        cgroup: CgroupV2,
+    }
 }
 
 struct DeadTasksInfo {
@@ -131,6 +144,7 @@ impl ProcessInfo {
             username: None,
             filter: None,
             cpuset: None,
+            use_cgroups_v2: true,
         }
     }
 
@@ -286,18 +300,29 @@ impl<'a> ResourceUsage<'a> {
     }
 
     pub fn update(&mut self) -> Result<()> {
-        let dead_tasks_info = self.active_tasks.update(&self.group.freezer)?;
+        let dead_tasks_info = self.active_tasks.update(&self.group)?;
         self.dead_tasks_info.num_dead_tasks += dead_tasks_info.num_dead_tasks;
         self.dead_tasks_info.total_bytes_written += dead_tasks_info.total_bytes_written;
         Ok(())
     }
 
     pub fn memory(&self) -> Result<Option<GroupMemory>> {
-        let mem = &self.group.memory;
-        Ok(Some(GroupMemory {
-            max_usage: mem.get_value::<u64>("memory.max_usage_in_bytes")?
-                + mem.get_value::<u64>("memory.kmem.max_usage_in_bytes")?,
-        }))
+        match self.group {
+            Group::V1 { memory, .. } => {
+                Ok(Some(GroupMemory {
+                    max_usage: memory.get_value::<u64>("memory.max_usage_in_bytes")?
+                        + memory.get_value::<u64>("memory.kmem.max_usage_in_bytes")?,
+                }))
+            }
+            Group::V2 { cgroup } => {
+                let mem_controller: &MemController = cgroup.controller_of().unwrap();
+                let memory_stat = mem_controller.memory_stat();
+
+                Ok(Some(GroupMemory {
+                    max_usage: memory_stat.max_usage_in_bytes,
+                }))
+            }
+        }
     }
 
     pub fn io(&self) -> Result<Option<GroupIo>> {
@@ -325,30 +350,58 @@ impl<'a> ResourceUsage<'a> {
     }
 
     pub fn timers(&self) -> Result<Option<GroupTimers>> {
-        let cpuacct = &self.group.cpuacct;
-        Ok(Some(GroupTimers {
-            total_user_time: Duration::from_nanos(cpuacct.get_value::<u64>("cpuacct.usage_user")?),
-            total_kernel_time: Duration::from_nanos(cpuacct.get_value::<u64>("cpuacct.usage_sys")?),
-        }))
+        match self.group {
+            Group::V1 { cpuacct, .. } => Ok(Some(GroupTimers {
+                total_user_time: Duration::from_nanos(cpuacct.get_value::<u64>("cpuacct.usage_user")?),
+                total_kernel_time: Duration::from_nanos(cpuacct.get_value::<u64>("cpuacct.usage_sys")?),
+            })),
+            Group::V2 { cgroup } => {
+                let cpuacct_controller: &CpuAcctController = cgroup.controller_of().unwrap();
+                let total_user_time = cpuacct_controller.cpuacct().usage_user;
+                let total_kernel_time = cpuacct_controller.cpuacct().usage_sys;
+                Ok(Some(GroupTimers {
+                    total_user_time: Duration::from_nanos(total_user_time),
+                    total_kernel_time: Duration::from_nanos(total_kernel_time),
+                }))
+            }
+        }
     }
 }
 
 impl Group {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            memory: create_cgroup("memory/sp")?,
-            cpuacct: create_cgroup("cpuacct/sp")?,
-            pids: create_cgroup("pids/sp")?,
-            freezer: create_cgroup("freezer/sp")?,
-        })
+    pub fn new(use_cgroupsv2: bool) -> Result<Self> {
+        if use_cgroupsv2 {
+            let hier = Box::new(cgroups_rs::hierarchies::V2::new());
+            let cgroup = CgroupBuilder::new("sp").build(hier).map_err(|e| {
+                Error::from(format!(
+                    "Cannot create cgroup v2!!!!!!: {}",
+                    e
+                ))
+            })?;
+            Ok(Self::V2 { cgroup })
+        } else {
+            Ok(Self::V1 {
+                memory: create_cgroup("memory/sp")?,
+                cpuacct: create_cgroup("cpuacct/sp")?,
+                pids: create_cgroup("pids/sp")?,
+                freezer: create_cgroup("freezer/sp")?,
+            })
+        }
     }
 
     fn add_pid(&mut self, pid: Pid) -> std::io::Result<()> {
-        self.memory
-            .add_task(pid)
-            .and(self.cpuacct.add_task(pid))
-            .and(self.pids.add_task(pid))
-            .and(self.freezer.add_task(pid))
+        match self {
+            Group::V1 { memory, cpuacct, pids, freezer } => {
+                memory.add_task(pid)
+                    .and(cpuacct.add_task(pid))
+                    .and(pids.add_task(pid))
+                    .and(freezer.add_task(pid))
+            }
+            Group::V2 { cgroup } => {
+                let pid_controller: &PidController = cgroup.controller_of().unwrap();
+                pid_controller.add_task(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            }
+        }
     }
 
     pub fn add(&mut self, ps: &Process) -> Result<()> {
@@ -356,41 +409,108 @@ impl Group {
     }
 
     pub fn set_os_limit(&mut self, limit: OsLimit, value: u64) -> Result<bool> {
-        match limit {
-            OsLimit::Memory => {
-                self.memory.set_value("memory.limit_in_bytes", value)?;
-            }
-            OsLimit::ActiveProcess => {
-                self.pids.set_value("pids.max", value)?;
-            }
+        match self {
+            Group::V1 { memory, pids, .. } => match limit {
+                OsLimit::Memory => {
+                    memory.set_value("memory.limit_in_bytes", value)?;
+                }
+                OsLimit::ActiveProcess => {
+                    pids.set_value("pids.max", value)?;
+                }
+            },
+            Group::V2 { cgroup } => match limit {
+                OsLimit::Memory => {
+                    let mem_controller: &MemController = cgroup.controller_of().unwrap();
+                    mem_controller.set_limit(value as i64).map_err(|err| {
+                        Error::from(format!("Cannot set  memory limit: {:?}", err))
+                    })?;
+                }
+                OsLimit::ActiveProcess => {
+                    let pid_controller: &PidController = cgroup.controller_of().unwrap();
+                    pid_controller.set_pid_max(MaxValue::Value(value as i64)).map_err(|err| {
+                        Error::from(format!("Cannot active process limit: {:?}", err))
+                    })?;;
+                }
+            },
         }
         Ok(true)
     }
 
     pub fn is_os_limit_hit(&self, limit: OsLimit) -> Result<bool> {
-        match limit {
-            OsLimit::Memory => Ok(self.memory.get_value::<usize>("memory.failcnt")? > 0),
-            OsLimit::ActiveProcess => Ok(self.pids.get_raw_value("pids.events")? != "max 0\n"),
+        match self {
+            Group::V1 { memory, pids, .. } => match limit {
+                OsLimit::Memory => Ok(memory.get_value::<usize>("memory.failcnt")? > 0),
+                OsLimit::ActiveProcess => Ok(pids.get_raw_value("pids.events")? != "max 0\n"),
+            },
+            Group::V2 { cgroup } => match limit {
+                OsLimit::Memory => {
+                    let mem_controller: &MemController = cgroup.controller_of().unwrap();
+                    let memory_stat = mem_controller.memory_stat();
+                    let memory_stat = memory_stat;
+                    Ok(memory_stat.fail_cnt > 0)
+                }
+                OsLimit::ActiveProcess => {
+                    let pid_controller: &PidController = cgroup.controller_of().unwrap();
+                    // let pid_events =;
+                    Ok(pid_controller.get_pid_events().map_err(|err| {
+                        Error::from(format!("error read pid events: {:?}", err))
+                    })? > 0)
+                }
+            },
         }
     }
 
     pub fn terminate(&self) -> Result<()> {
-        self.freezer.set_raw_value("freezer.state", "FROZEN")?;
-        while self.freezer.get_raw_value("freezer.state")? == "FREEZING" {
-            thread::sleep(Duration::from_millis(1));
+        match self {
+            Group::V1 { freezer, .. } => {
+                freezer.set_raw_value("freezer.state", "FROZEN")?;
+                while freezer.get_raw_value("freezer.state")? == "FREEZING" {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                freezer.send_signal_to_all_tasks(Signal::SIGKILL)?;
+                freezer.set_raw_value("freezer.state", "THAWED")?;
+            }
+            Group::V2 { cgroup } => {
+                let freeze_controller: &FreezerController = cgroup.controller_of().unwrap();
+                freeze_controller.freeze().map_err(|err| {
+                    Error::from(format!("freezer error: {:?}", err))
+                })?;
+                
+                while let Ok(state) = freeze_controller.state(){
+                    match state {
+                        FreezerState::Freezing => {
+                            break;
+                        },
+                        _ => {
+                            continue;
+                        }
+                    }
+                }
+                cgroup.kill().map_err(|err| {
+                    Error::from(format!("error kill processes: {:?}", err))
+                })? ;
+                freeze_controller.thaw().map_err(|err| {
+                    Error::from(format!("Thaw Error: {:?}", err))
+                })? ;
+            }
         }
-        self.freezer.send_signal_to_all_tasks(Signal::SIGKILL)?;
-        self.freezer.set_raw_value("freezer.state", "THAWED")?;
         Ok(())
     }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
-        self.freezer.remove().ok();
-        self.memory.remove().ok();
-        self.cpuacct.remove().ok();
-        self.pids.remove().ok();
+        match self {
+            Group::V1 { freezer, memory, cpuacct, pids } => {
+                freezer.remove().ok();
+                memory.remove().ok();
+                cpuacct.remove().ok();
+                pids.remove().ok();
+            }
+            Group::V2 { cgroup } => {
+                cgroup.delete().ok();
+            }
+        }
     }
 }
 
@@ -436,26 +556,50 @@ impl ActiveTasks {
             .count())
     }
 
-    fn update(&mut self, freezer: &Cgroup) -> Result<DeadTasksInfo> {
+    fn update(&mut self, group: &Group) -> Result<DeadTasksInfo> {
         self.pid_by_inode.clear();
-        let new_wchar_by_pid = freezer
-            .get_tasks()?
-            .into_iter()
-            .filter_map(|pid| procfs::process::Process::new(pid.as_raw()).ok())
-            .map(|ps| {
-                let pid = Pid::from_raw(ps.pid());
+        let new_wchar_by_pid = match group {
+            Group::V1 { freezer, .. } => {
+                freezer
+                    .get_tasks()?
+                    .into_iter()
+                    .filter_map(|pid| procfs::process::Process::new(pid.as_raw()).ok())
+                    .map(|ps| {
+                        let pid = Pid::from_raw(ps.pid());
 
-                if let Ok(fds) = ps.fd() {
-                    self.pid_by_inode
-                        .extend(fds.into_iter().filter_map(|fd| match fd.target {
-                            FDTarget::Socket(inode) => Some((inode, pid)),
-                            _ => None,
-                        }));
-                }
+                        if let Ok(fds) = ps.fd() {
+                            self.pid_by_inode
+                                .extend(fds.into_iter().filter_map(|fd| match fd.target {
+                                    FDTarget::Socket(inode) => Some((inode, pid)),
+                                    _ => None,
+                                }));
+                        }
 
-                (pid, ps.io().ok().map(|io| io.wchar))
-            })
-            .collect::<HashMap<Pid, Option<u64>>>();
+                        (pid, ps.io().ok().map(|io| io.wchar))
+                    })
+                    .collect::<HashMap<Pid, Option<u64>>>()
+            }
+            Group::V2 { cgroup } => {
+                let tasks = cgroup.tasks();
+                tasks
+                    .into_iter()
+                    .filter_map(|pid | procfs::process::Process::new(Pid::from_raw(pid.pid as i32).as_raw()).ok())
+                    .map(|ps| {
+                        let pid = Pid::from_raw(ps.pid());
+
+                        if let Ok(fds) = ps.fd() {
+                            self.pid_by_inode
+                                .extend(fds.into_iter().filter_map(|fd| match fd.target {
+                                    FDTarget::Socket(inode) => Some((inode, pid)),
+                                    _ => None,
+                                }));
+                        }
+
+                        (pid, ps.io().ok().map(|io| io.wchar))
+                    })
+                    .collect::<HashMap<Pid, Option<u64>>>()
+            }
+        };
 
         let old_wchar_by_pid = &mut self.wchar_by_pid;
         let dead_tasks = old_wchar_by_pid
@@ -507,13 +651,13 @@ impl User {
     }
 }
 
-fn create_cgroup(subsystem: &'static str) -> Result<Cgroup> {
+fn create_cgroup(subsystem: &'static str) -> Result<CgroupV1> {
     let mut rng = thread_rng();
     let name = format!(
         "task_{}",
         (0..7).map(|_| rng.sample(Alphanumeric)).collect::<String>()
     );
-    let cgroup = Cgroup::new(&CgroupName::new(&name), subsystem);
+    let cgroup = CgroupV1::new(&CgroupName::new(&name), subsystem);
     cgroup.create().map_err(|e| {
         Error::from(format!(
             "Cannot create cgroup /{}/{}: {}",
@@ -683,3 +827,4 @@ fn create_process(
 
     process::exit(0);
 }
+

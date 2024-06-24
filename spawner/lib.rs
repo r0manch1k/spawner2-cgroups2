@@ -15,6 +15,7 @@ cfg_if! {
         extern crate rand;
         extern crate cgroups_fs;
         extern crate procfs;
+        extern crate cgroups_rs;
 
         pub mod unix {
             pub use sys::process_ext as process;
