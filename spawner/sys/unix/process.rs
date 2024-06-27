@@ -356,9 +356,31 @@ impl<'a> ResourceUsage<'a> {
                 total_kernel_time: Duration::from_nanos(cpuacct.get_value::<u64>("cpuacct.usage_sys")?),
             })),
             Group::V2 { cgroup } => {
-                let cpuacct_controller: &CpuAcctController = cgroup.controller_of().unwrap();
-                let total_user_time = cpuacct_controller.cpuacct().usage_user;
-                let total_kernel_time = cpuacct_controller.cpuacct().usage_sys;
+                let cpu_controller: &CpuController = cgroup.controller_of().expect("Failed to get CPU controller");
+                let cgroup_stat = cpu_controller.cpu().stat;
+                let mut user_usec = 0;
+                let mut system_usec= 0;
+                for line in cgroup_stat.lines() {
+                    let mut parts = line.split_whitespace();
+                    if let (Some(key), Some(value_str)) = (parts.next(), parts.next()) {
+                        if let Ok(value) = value_str.parse::<u64>() {
+                            match key {
+                                "user_usec" => {
+                                    user_usec = value;
+                                    println!("User time: {} microseconds", value);
+                                }
+                                "system_usec" => {
+                                    system_usec = value;
+                                    println!("System time: {} microseconds", value);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                // let cpuacct_controller: &CpuAcctController = cgroup.controller_of().expect("No Cpuacct controller attached!");
+                let total_user_time = user_usec;
+                let total_kernel_time = system_usec;
                 Ok(Some(GroupTimers {
                     total_user_time: Duration::from_nanos(total_user_time),
                     total_kernel_time: Duration::from_nanos(total_kernel_time),
@@ -371,8 +393,14 @@ impl<'a> ResourceUsage<'a> {
 impl Group {
     pub fn new(use_cgroupsv2: bool) -> Result<Self> {
         if use_cgroupsv2 {
+            let mut rng = thread_rng();
+            let name = format!(
+                "task_{}",
+                (0..7).map(|_| rng.sample(Alphanumeric)).collect::<String>()
+            );
             let hier = Box::new(cgroups_rs::hierarchies::V2::new());
-            let cgroup = CgroupBuilder::new("sp").build(hier).map_err(|e| {
+            let cgroup_builder = CgroupBuilder::new(name.as_str());
+            let cgroup = cgroup_builder.build(hier).map_err(|e| {
                 Error::from(format!(
                     "Cannot create cgroup v2!!!!!!: {}",
                     e
@@ -398,8 +426,30 @@ impl Group {
                     .and(freezer.add_task(pid))
             }
             Group::V2 { cgroup } => {
-                let pid_controller: &PidController = cgroup.controller_of().unwrap();
-                pid_controller.add_task(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                let pid_controller: &PidController = cgroup.controller_of().expect("Failed to get PID controller");
+                // cgroup.add_task(CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
+                //     let cgt = cgroup.v2();
+                //     if cgt {
+                //         println!("CGT {}", e);
+                //     }
+                //     eprintln!("Failed add task!!!: {}", e);
+                //     std::io::Error::new(std::io::ErrorKind::Other, e)
+                // })
+                // let freeze_controller: &FreezerController = cgroup.controller_of().expect("Failed to get Freezer controller");
+                // freeze_controller.add_task_by_tgid(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
+                //     eprintln!("Failed add task: {}", e);
+                //     std::io::Error::new(std::io::ErrorKind::Other, e)
+                // });
+                // let mem_controller: &MemController = cgroup.controller_of().expect("Failed to get Freezer controller");
+                // mem_controller.add_task_by_tgid(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
+                //     eprintln!("Failed add task: {}", e);
+                //     std::io::Error::new(std::io::ErrorKind::Other, e)
+                // });
+                eprintln!("Great Job");
+                pid_controller.add_task_by_tgid(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
+                    eprintln!("Failed add task: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })
             }
         }
     }
@@ -428,7 +478,7 @@ impl Group {
                 OsLimit::ActiveProcess => {
                     let pid_controller: &PidController = cgroup.controller_of().unwrap();
                     pid_controller.set_pid_max(MaxValue::Value(value as i64)).map_err(|err| {
-                        Error::from(format!("Cannot active process limit: {:?}", err))
+                        Error::from(format!("Cannot set active process limit: {:?}", err))
                     })?;;
                 }
             },
@@ -463,6 +513,7 @@ impl Group {
     pub fn terminate(&self) -> Result<()> {
         match self {
             Group::V1 { freezer, .. } => {
+                eprintln!("terminated");
                 freezer.set_raw_value("freezer.state", "FROZEN")?;
                 while freezer.get_raw_value("freezer.state")? == "FREEZING" {
                     thread::sleep(Duration::from_millis(1));
@@ -737,6 +788,7 @@ fn init_child_process(
         .map(|g| g.add_pid(Pid::this()))
         .transpose()
         .map_err(|e| {
+            eprintln!("Error group add_pid: {:?}", e);
             InitError::Group(
                 e.raw_os_error()
                     .map(|v| nix::Error::from_errno(Errno::from_i32(v))),
@@ -801,7 +853,7 @@ fn create_process(
         .collect::<Vec<_>>();
 
     if let ForkResult::Parent { child, .. } = fork()? {
-        // Wait for initialization to complete.
+        //Wait for initialization to complete.
         waitpid(child, Some(WaitPidFlag::WSTOPPED))?;
         if !info.suspended {
             kill(child, Signal::SIGCONT)?;
@@ -822,7 +874,11 @@ fn create_process(
         info.cpuset.as_ref(),
     )
     .and_then(|_| {
-        exec_app(&app, &args_ref, &env_ref, info.search_in_path).map_err(InitError::Other)
+        println!("Before exec_app call");
+        exec_app(&app, &args_ref, &env_ref, info.search_in_path).map_err(|err| {
+            eprintln!("Error executing app: {:?}", err);
+            InitError::Other(err)
+        })
     });
 
     process::exit(0);
