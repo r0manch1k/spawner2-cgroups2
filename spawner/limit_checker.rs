@@ -94,7 +94,7 @@ impl LimitChecker {
             TerminationReason::UserTimeLimitExceeded
         } else if gr(io.total_bytes_written, limits.total_bytes_written) {
             TerminationReason::WriteLimitExceeded
-        } else if gr(memory.max_usage, limits.max_memory_usage) {
+        } else if gr(memory.max_usage + 1, limits.max_memory_usage) {
             TerminationReason::MemoryLimitExceeded
         } else if gr(pid_counters.total_processes, limits.total_processes_created) {
             TerminationReason::ProcessLimitExceeded
