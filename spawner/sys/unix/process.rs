@@ -23,11 +23,9 @@ use nix::unistd::{
 
 use cgroups_fs::{Cgroup as CgroupV1, CgroupName};
 use cgroups_rs::cgroup::Cgroup as CgroupV2;
-use cgroups_rs::{memory::MemController, cpu::CpuController, cpuacct::CpuAcctController, pid::PidController, freezer::FreezerController,
+use cgroups_rs::{memory::MemController, cpu::CpuController, pid::PidController, freezer::FreezerController,
                  MaxValue, Controller, CgroupPid};
-use cgroups_rs::PidResources;
 use cgroups_rs::cgroup_builder::CgroupBuilder;
-use cgroups_rs::hierarchies;
 
 use procfs::process::FDTarget;
 
@@ -42,7 +40,6 @@ use std::os::unix::io::RawFd;
 use std::process;
 use std::thread;
 use std::time::Duration;
-use cgroups_rs::freezer::FreezerState;
 
 pub struct Stdio {
     pub stdin: ReadPipe,
@@ -66,7 +63,6 @@ pub struct ProcessInfo {
     username: Option<String>,
     filter: Option<SyscallFilter>,
     cpuset: Option<CpuSet>,
-    use_cgroups_v2 : bool,
 }
 
 #[derive(Copy, Clone)]
@@ -144,7 +140,6 @@ impl ProcessInfo {
             username: None,
             filter: None,
             cpuset: None,
-            use_cgroups_v2: true,
         }
     }
 
@@ -367,18 +362,15 @@ impl<'a> ResourceUsage<'a> {
                             match key {
                                 "user_usec" => {
                                     user_usec = value;
-                                    println!("User time: {} microseconds", value);
                                 }
                                 "system_usec" => {
                                     system_usec = value;
-                                    println!("System time: {} microseconds", value);
                                 }
                                 _ => {}
                             }
                         }
                     }
                 }
-                // let cpuacct_controller: &CpuAcctController = cgroup.controller_of().expect("No Cpuacct controller attached!");
                 let total_user_time = user_usec;
                 let total_kernel_time = system_usec;
                 Ok(Some(GroupTimers {
@@ -403,7 +395,7 @@ impl Group {
             let cgroup_builder = CgroupBuilder::new(name.as_str());
             let cgroup = cgroup_builder.build(hier).map_err(|e| {
                 Error::from(format!(
-                    "Cannot create cgroup v2!!!!!!: {}",
+                    "Cannot create cgroup v2: {}",
                     e
                 ))
             })?;
@@ -428,25 +420,6 @@ impl Group {
             }
             Group::V2 { cgroup } => {
                 let pid_controller: &PidController = cgroup.controller_of().expect("Failed to get PID controller");
-                // cgroup.add_task(CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
-                //     let cgt = cgroup.v2();
-                //     if cgt {
-                //         println!("CGT {}", e);
-                //     }
-                //     eprintln!("Failed add task!!!: {}", e);
-                //     std::io::Error::new(std::io::ErrorKind::Other, e)
-                // })
-                // let freeze_controller: &FreezerController = cgroup.controller_of().expect("Failed to get Freezer controller");
-                // freeze_controller.add_task_by_tgid(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
-                //     eprintln!("Failed add task: {}", e);
-                //     std::io::Error::new(std::io::ErrorKind::Other, e)
-                // });
-                // let mem_controller: &MemController = cgroup.controller_of().expect("Failed to get Freezer controller");
-                // mem_controller.add_task_by_tgid(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
-                //     eprintln!("Failed add task: {}", e);
-                //     std::io::Error::new(std::io::ErrorKind::Other, e)
-                // });
-                eprintln!("Great Job");
                 pid_controller.add_task_by_tgid(&CgroupPid::from(pid.as_raw() as u64)).map_err(|e| {
                     eprintln!("Failed add task: {}", e);
                     std::io::Error::new(std::io::ErrorKind::Other, e)
@@ -502,7 +475,6 @@ impl Group {
                 }
                 OsLimit::ActiveProcess => {
                     let pid_controller: &PidController = cgroup.controller_of().unwrap();
-                    // let pid_events =;
                     Ok(pid_controller.get_pid_events().map_err(|err| {
                         Error::from(format!("error read pid events: {:?}", err))
                     })? > 0)
@@ -514,7 +486,6 @@ impl Group {
     pub fn terminate(&self) -> Result<()> {
         match self {
             Group::V1 { freezer, .. } => {
-                eprintln!("terminated");
                 freezer.set_raw_value("freezer.state", "FROZEN")?;
                 while freezer.get_raw_value("freezer.state")? == "FREEZING" {
                     thread::sleep(Duration::from_millis(1));
@@ -528,16 +499,6 @@ impl Group {
                     Error::from(format!("freezer error: {:?}", err))
                 })?;
                 
-                // while let Ok(state) = freeze_controller.state(){
-                //     match state {
-                //         FreezerState::Freezing => {
-                //             break;
-                //         },
-                //         _ => {
-                //             continue;
-                //         }
-                //     }
-                // }
                 cgroup.kill().map_err(|err| {
                     Error::from(format!("error kill processes: {:?}", err))
                 })? ;
@@ -875,9 +836,7 @@ fn create_process(
         info.cpuset.as_ref(),
     )
     .and_then(|_| {
-        println!("Before exec_app call");
         exec_app(&app, &args_ref, &env_ref, info.search_in_path).map_err(|err| {
-            eprintln!("Error executing app: {:?}", err);
             InitError::Other(err)
         })
     });
