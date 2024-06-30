@@ -8,7 +8,6 @@ use crate::sys::unix::shared_mem::SharedMem;
 use crate::sys::{AsInnerMut, IntoInner};
 use crate::{Error, Result};
 
-use nix::errno::Errno;
 use nix::libc::{
     c_ushort, getpwnam, prctl, PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, STDERR_FILENO, STDIN_FILENO,
     STDOUT_FILENO,
@@ -453,7 +452,7 @@ impl Group {
                     let pid_controller: &PidController = cgroup.controller_of().unwrap();
                     pid_controller.set_pid_max(MaxValue::Value(value as i64)).map_err(|err| {
                         Error::from(format!("Cannot set active process limit: {:?}", err))
-                    })?;;
+                    })?;
                 }
             },
         }
@@ -498,7 +497,7 @@ impl Group {
                 freeze_controller.freeze().map_err(|err| {
                     Error::from(format!("freezer error: {:?}", err))
                 })?;
-                
+
                 cgroup.kill().map_err(|err| {
                     Error::from(format!("error kill processes: {:?}", err))
                 })? ;
@@ -753,7 +752,7 @@ fn init_child_process(
             eprintln!("Error group add_pid: {:?}", e);
             InitError::Group(
                 e.raw_os_error()
-                    .map(|v| nix::Error::from_errno(Errno::from_i32(v))),
+                    .map(|v| nix::Error::from_i32(v)),
             )
         })?;
 
