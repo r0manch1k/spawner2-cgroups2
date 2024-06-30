@@ -382,8 +382,8 @@ impl<'a> ResourceUsage<'a> {
                 let total_user_time = user_usec;
                 let total_kernel_time = system_usec;
                 Ok(Some(GroupTimers {
-                    total_user_time: Duration::from_nanos(total_user_time),
-                    total_kernel_time: Duration::from_nanos(total_kernel_time),
+                    total_user_time: Duration::from_micros(total_user_time),
+                    total_kernel_time: Duration::from_micros(total_kernel_time),
                 }))
             }
         }
@@ -399,6 +399,7 @@ impl Group {
                 (0..7).map(|_| rng.sample(Alphanumeric)).collect::<String>()
             );
             let hier = Box::new(cgroups_rs::hierarchies::V2::new());
+            
             let cgroup_builder = CgroupBuilder::new(name.as_str());
             let cgroup = cgroup_builder.build(hier).map_err(|e| {
                 Error::from(format!(
@@ -527,16 +528,16 @@ impl Group {
                     Error::from(format!("freezer error: {:?}", err))
                 })?;
                 
-                while let Ok(state) = freeze_controller.state(){
-                    match state {
-                        FreezerState::Freezing => {
-                            break;
-                        },
-                        _ => {
-                            continue;
-                        }
-                    }
-                }
+                // while let Ok(state) = freeze_controller.state(){
+                //     match state {
+                //         FreezerState::Freezing => {
+                //             break;
+                //         },
+                //         _ => {
+                //             continue;
+                //         }
+                //     }
+                // }
                 cgroup.kill().map_err(|err| {
                     Error::from(format!("error kill processes: {:?}", err))
                 })? ;
