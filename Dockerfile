@@ -1,8 +1,5 @@
 FROM ubuntu:latest
 
-WORKDIR /usr/src/spawner2
-COPY . .
-
 RUN apt-get update && \
       apt-get -y install sudo curl
 
@@ -12,7 +9,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN apt-get -y install build-essential
 
-WORKDIR /usr/src/spawner
+WORKDIR /usr/src/spawner2
 COPY . .
 
 RUN cargo build --release
