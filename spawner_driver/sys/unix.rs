@@ -117,6 +117,28 @@ pub fn init_os_specific_process_extensions(
         10,  // mprotect
     ];
 
+    #[cfg(target_arch = "aarch64")]
+    let syscall_codes = [
+        139, // rt_sigreturn
+        94,  // exit_group
+        93,  // exit
+        63,  // read
+        64,  // write
+        135, // rt_sigprocmask
+        134, // rt_sigaction
+        101, // nanosleep
+        214, // brk
+        221, // execve
+        57,  // close
+        56,  // open
+        21,  // access
+        80,  // fstat
+        222, // mmap
+        107, // arch_prctl (на aarch64 обычно не требуется, но есть аналог)
+        215, // munmap
+        226, // mprotect
+    ];
+
     if cmd.secure {
         let mut builder = SyscallFilterBuilder::block_all();
         for syscall in syscall_codes.iter() {

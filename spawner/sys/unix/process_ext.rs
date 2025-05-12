@@ -24,9 +24,12 @@ const ARCH_NR: __u32 = missing_decls::AUDIT_ARCH_I386;
 #[cfg(target_arch = "x86_64")]
 const ARCH_NR: __u32 = missing_decls::AUDIT_ARCH_X86_64;
 
+#[cfg(target_arch = "aarch64")]
+const ARCH_NR: __u32 = missing_decls::AUDIT_ARCH_X86_64;
+
 impl SyscallFilterBuilder {
     pub fn block_all() -> Self {
-        let arch_offset = 4; // offsetof(struct seccomp_data, arch)
+        let arch_offset = 4;     // offsetof(struct seccomp_data, arch)
         let nr_offset = 0; // offsetof(struct seccomp_data, nr)
         Self(vec![
             // Validate architecture.

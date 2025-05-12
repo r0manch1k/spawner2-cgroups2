@@ -24,6 +24,7 @@ pub struct seccomp_data {
 
 pub const AUDIT_ARCH_I386: __u32 = 0x4000_0003;
 pub const AUDIT_ARCH_X86_64: __u32 = 0xC000_003E;
+pub const AUDIT_ARCH_AARCH64: __u32 = 0xC000_00B7;
 
 pub const SECCOMP_RET_KILL: __u32 = 0x0000_0000;
 pub const SECCOMP_RET_ALLOW: __u32 = 0x7fff_0000;
