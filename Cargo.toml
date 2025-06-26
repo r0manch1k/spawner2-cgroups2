@@ -1,9 +1,3 @@
-[package]
-name = "spawner"
-version = "0.0.1"
-authors = ["?"]
-edition = "2018"
-
 [workspace]
 members = [
 	"spawner",
