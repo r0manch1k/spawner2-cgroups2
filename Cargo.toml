@@ -2,7 +2,7 @@
 name = "spawner"
 version = "0.0.1"
 authors = ["?"]
-edition = "2025"
+edition = "2024"
 
 [workspace]
 members = [
