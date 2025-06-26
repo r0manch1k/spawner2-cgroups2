@@ -5,7 +5,6 @@ authors = ["?"]
 edition = "2025"
 
 [workspace]
-
 members = [
 	"spawner",
 	"spawner_driver",
