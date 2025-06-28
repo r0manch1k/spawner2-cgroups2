@@ -1,4 +1,5 @@
 # spawner2
+[![Rust](https://github.com/r0manch1k/spawner2-cgroups2/actions/workflows/rust.yml/badge.svg)](https://github.com/r0manch1k/spawner2-cgroups2/actions/workflows/rust.yml)
 
 Crossplatform sandbox for running user submitted code. Designed as a part of [CATS](https://github.com/klenin/cats-judge) contest control system.
 
